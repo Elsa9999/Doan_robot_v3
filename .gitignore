@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.Python
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Logs / temp
+*.log
+out*.log
+out*.txt
+
+# PyBullet / simulation scratch
+test_pb.py
+test_pb_args.py
+mock_test.py
+test_hmi_full.py
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Mesh files (too large for git — copy manually)
+urdf/meshes/*.stl
+urdf/meshes/*.dae
+urdf/meshes/*.obj

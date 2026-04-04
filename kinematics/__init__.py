@@ -1,0 +1,3 @@
+"""
+Init for kinematics module.
+"""
