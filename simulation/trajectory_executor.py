@@ -17,9 +17,9 @@ class TrajectoryExecutor:
     # ─── Public API ───────────────────────────────────────────────────────────
 
     def execute(self, trajectory, done_callback=None, speed_scale: float = 1.0):
-        """Bắt đầu chạy trajectory. Gọi trong simulation thread."""
+        """Bắt đầu chạy trajectory. Thực thi đồng bộ với simulation steps."""
         self._traj          = trajectory
-        self._t0            = time.time()
+        self._t             = 0.0
         self._running       = True
         self._done_callback = done_callback
         self._speed_scale   = max(0.1, min(2.0, speed_scale))
@@ -47,7 +47,8 @@ class TrajectoryExecutor:
         if not self._running or self._traj is None:
             return {'running': False, 'progress': 0.0, 't': 0.0, 'q': None}
 
-        t = (time.time() - self._t0) * self._speed_scale
+        self._t += (1.0 / 240.0) * self._speed_scale
+        t = self._t
         point = self._traj.get_point(t)
 
         # Set joint với max_velocity cao hơn manual vì trajectory đã smooth

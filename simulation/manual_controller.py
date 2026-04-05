@@ -4,6 +4,7 @@ from kinematics.forward_kinematics import forward_kinematics
 from kinematics.inverse_kinematics import inverse_kinematics
 from kinematics.workspace_validator import WorkspaceValidator
 from simulation.environment import UR5eEnvironment, HOME_POSE
+from utils.transforms import local_to_world, world_to_local
 
 JOINT_LIMITS = {
     'lower': [-6.28, -6.28, -3.14, -6.28, -6.28, -6.28],
@@ -90,8 +91,8 @@ class ManualController:
     def _apply_joints(self, q):
         # Validate workspace trước khi apply
         fk_res = forward_kinematics(q)
-        pos = fk_res['position']
-        ok, reason = self._validator.is_valid_ee(pos)
+        w_pos = local_to_world(fk_res['position'])
+        ok, reason = self._validator.is_valid_ee(w_pos)
         if not ok:
             print(f"[CTRL] Blocked by workspace: {reason}")
             return
@@ -113,25 +114,26 @@ class ManualController:
     def handle_cartesian_mode(self, action: str):
         if not action.startswith('cart_'): return
         fk_res = forward_kinematics(self._q_current)
-        pos   = list(fk_res['position'])
-        euler = fk_res['euler']
+        pos, euler = local_to_world(fk_res['position'], fk_res['euler'])
+        pos_list = list(pos)
         parts = action.split('_')
         axis  = parts[1]
         direction = 1 if parts[2] == 'plus' else -1
-        pos[{'x': 0, 'y': 1, 'z': 2}[axis]] += direction * self._step_cart
+        pos_list[{'x': 0, 'y': 1, 'z': 2}[axis]] += direction * self._step_cart
 
         # Workspace check trước khi gọi IK
-        ok, reason = self._validator.is_valid_ee(pos)
+        ok, reason = self._validator.is_valid_ee(pos_list)
         if not ok:
             print(f"[CTRL] Blocked: {reason}")
             return
 
-        res = inverse_kinematics(pos, euler, q_current=self._q_current)
+        l_pos, l_eul = world_to_local(pos_list, euler)
+        res = inverse_kinematics(l_pos, l_eul, q_current=self._q_current)
         best = res['best']
         if best is not None:
             self._apply_joints(best)
         else:
-            print(f"[CTRL] IK failed at pos: {pos}")
+            print(f"[CTRL] IK failed at pos: {pos_list}")
 
     def go_home(self):
         self._q_current = list(HOME_POSE)

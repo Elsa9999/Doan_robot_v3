@@ -244,7 +244,7 @@ class CartesianTrajectory:
             ok, reason = validator.is_valid_ee(positions[i])
             if not ok:
                 raise ValueError(
-                    f"Trajectory passes through invalid workspace at step {i}: {reason}"
+                    f"Trajectory passes through invalid workspace at step {i}/{N}: {reason}. pos_s={pos_s}, pos_e={pos_e}, at={positions[i]}"
                 )
 
         return CartesianTrajectory(timestamps, positions, eulers)
@@ -267,6 +267,7 @@ class CartesianTrajectory:
         dt: float = 1 / 240
     ) -> JointTrajectory:
         from kinematics.inverse_kinematics import inverse_kinematics
+        from utils.transforms import world_to_local
 
         N = len(self.timestamps)
         positions  = np.zeros((N, 6))
@@ -276,7 +277,11 @@ class CartesianTrajectory:
 
         for i, t in enumerate(self.timestamps):
             pose   = self.get_pose(float(t))
-            result = ik_func(pose['pos'], pose['euler'], q_current=q_prev)
+            
+            # Trajectory runs in WORLD coords, IK needs LOCAL coords
+            local_pos, local_eul = world_to_local(pose['pos'], pose['euler'])
+            
+            result = ik_func(local_pos, local_eul, q_current=q_prev)
             best   = result.get('best')
             if best is None:
                 raise ValueError(

@@ -1,7 +1,7 @@
 import time
 from datetime import datetime
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QSplitter, QScrollArea, 
-                             QAction, QToolBar, QStatusBar, QLabel)
+                             QAction, QToolBar, QStatusBar, QLabel, QTabWidget)
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QIcon
 
@@ -10,8 +10,10 @@ from hmi.widgets.cartesian_panel import CartesianPanel
 from hmi.widgets.status_panel import StatusPanel
 from hmi.widgets.log_panel import LogPanel
 from hmi.widgets.trajectory_panel import TrajectoryPanel
+from hmi.widgets.auto_panel import AutoPanel
 from kinematics.forward_kinematics import forward_kinematics
 from kinematics.workspace_validator import WorkspaceValidator
+from utils.transforms import local_to_world
 
 class MainWindow(QMainWindow):
     def __init__(self, bridge):
@@ -127,43 +129,65 @@ class MainWindow(QMainWindow):
 
     def _setup_central_widget(self):
         main_splitter = QSplitter(Qt.Vertical)
-        
-        top_splitter = QSplitter(Qt.Horizontal)
-        
-        # Left
+        top_splitter  = QSplitter(Qt.Horizontal)
+
+        # ── Tab widget for left/mid controls ──────────────────────────────
+        self.tab_widget = QTabWidget()
+        self.tab_widget.setStyleSheet("""
+            QTabBar::tab { background:#2d2d2d; color:#aaa; padding:6px 14px; border-radius:3px 3px 0 0; }
+            QTabBar::tab:selected { background:#1e1e1e; color:#00aaff; border-bottom:2px solid #00aaff; }
+        """)
+
+        # Tab 1: Manual
+        manual_splitter = QSplitter(Qt.Horizontal)
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         self.joint_panel = JointPanel()
         scroll_area.setWidget(self.joint_panel)
-        top_splitter.addWidget(scroll_area)
-        
-        # Mid-Left: Cartesian
+        manual_splitter.addWidget(scroll_area)
         self.cartesian_panel = CartesianPanel()
-        top_splitter.addWidget(self.cartesian_panel)
-        
-        # Mid-Right: Trajectory
+        manual_splitter.addWidget(self.cartesian_panel)
+        manual_splitter.setStretchFactor(0, 1)
+        manual_splitter.setStretchFactor(1, 1)
+        self.tab_widget.addTab(manual_splitter, "🕹  Manual")
+
+        # Tab 2: Trajectory
         self.traj_panel = TrajectoryPanel()
-        top_splitter.addWidget(self.traj_panel)
-        
-        # Right: Status
+        self.tab_widget.addTab(self.traj_panel, "📈  Trajectory")
+
+        # Tab 3: Auto
+        self.auto_panel = AutoPanel()
+        self.tab_widget.addTab(self.auto_panel, "🤖  Auto")
+
+        # Disable manual/traj when Auto is active
+        self.tab_widget.currentChanged.connect(self._on_tab_changed)
+
+        top_splitter.addWidget(self.tab_widget)
+
+        # Right: Status panel
         self.status_panel = StatusPanel()
         top_splitter.addWidget(self.status_panel)
-        
-        top_splitter.setStretchFactor(0, 2)
-        top_splitter.setStretchFactor(1, 2)
-        top_splitter.setStretchFactor(2, 2)
-        top_splitter.setStretchFactor(3, 1)
-        
+        top_splitter.setStretchFactor(0, 4)
+        top_splitter.setStretchFactor(1, 1)
+
         main_splitter.addWidget(top_splitter)
-        
-        # Bottom
+
+        # Bottom: Log
         self.log_panel = LogPanel()
         main_splitter.addWidget(self.log_panel)
-        
         main_splitter.setStretchFactor(0, 3)
         main_splitter.setStretchFactor(1, 1)
-        
+
         self.setCentralWidget(main_splitter)
+
+    def _on_tab_changed(self, idx):
+        tab_name = self.tab_widget.tabText(idx)
+        if 'Auto' in tab_name:
+            # Switch to auto tab — do nothing, user presses Start
+            pass
+        else:
+            # Switch away from auto — stop auto if running
+            self._bridge.send_command({'type': 'stop_auto'})
 
     def _setup_statusbar(self):
         self.statusBar()
@@ -188,12 +212,19 @@ class MainWindow(QMainWindow):
         self.traj_panel.traj_stop.connect(lambda: self._bridge.send_command({'type': 'stop_traj'}))
         self.traj_panel.speed_changed.connect(
             lambda s: self._bridge.send_command({'type': 'set_speed', 'speed_scale': s}))
+        # Auto panel
+        self.auto_panel.auto_start.connect(self._on_auto_start)
+        self.auto_panel.auto_stop.connect(
+            lambda: self._bridge.send_command({'type': 'stop_auto'}))
+        self.auto_panel.reset_error.connect(
+            lambda: self._bridge.send_command({'type': 'reset_error'}))
         
     def _on_joints_changed(self, q):
         if self._estop: return
         # Workspace pre-check
         fk_res = forward_kinematics(q)
-        ok, reason = self._validator.is_valid_ee(fk_res['position'])
+        w_pos = local_to_world(fk_res['position'])
+        ok, reason = self._validator.is_valid_ee(w_pos)
         if not ok:
             self.log_panel.log(f"Blocked: {reason}", 'WARN')
             return
@@ -230,6 +261,12 @@ class MainWindow(QMainWindow):
                 'speed_scale': speed
             })
             self.log_panel.log(f"Cart traj -> XYZ={[f'{v:.3f}' for v in target[:3]]}", 'CMD')
+
+    def _on_auto_start(self, repeat: bool):
+        if self._estop: return
+        self._bridge.send_command({'type': 'start_auto', 'auto_repeat': repeat})
+        mode = 'repeat' if repeat else '1 cycle'
+        self.log_panel.log(f"Auto mode started ({mode})", 'CMD')
         
     def _refresh_ui(self):
         state = self._bridge.get_state()
@@ -250,9 +287,18 @@ class MainWindow(QMainWindow):
             self._estop_state = state['estop']
             self.log_panel.log("E-Stop state changed", 'WARN')
 
-        # Forward bridge logs to log panel
+        # Forward bridge logs
         for entry in state.get('logs', []):
             self.log_panel.log(entry['msg'], entry.get('level', 'INFO'))
+
+        # Auto panel
+        self.auto_panel.update_state({
+            'state':     state.get('sm_state', 'IDLE'),
+            'cycle':     state.get('sm_cycle', 0),
+            'gripper':   state.get('gripper', False),
+            'mode':      state.get('mode', 'manual'),
+            'error_msg': state.get('sm_error', ''),
+        })
 
         # Workspace indicator
         ws_ok = state.get('workspace_ok', True)

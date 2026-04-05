@@ -1,5 +1,9 @@
 import sys
+import os
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from threading import Thread
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import Qt, QTimer

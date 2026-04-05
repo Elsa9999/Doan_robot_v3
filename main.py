@@ -1,5 +1,10 @@
 import time
 import sys
+
+# Configure stdout to use UTF-8 to prevent UnicodeEncodeError on Windows
+if sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8')
+
 from simulation.environment import UR5eEnvironment
 from simulation.manual_controller import ManualController
 from kinematics.forward_kinematics import forward_kinematics

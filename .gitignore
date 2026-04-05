@@ -38,7 +38,28 @@ test_hmi_full.py
 .DS_Store
 Thumbs.db
 
-# Mesh files (too large for git — copy manually)
-urdf/meshes/*.stl
-urdf/meshes/*.dae
-urdf/meshes/*.obj
+# Mesh files — only keep ur5e, exclude others
+urdf/meshes/ur3/
+urdf/meshes/ur3e/
+urdf/meshes/ur5/
+urdf/meshes/ur10/
+urdf/meshes/ur10e/
+urdf/meshes/ur15/
+urdf/meshes/ur16e/
+urdf/meshes/ur18/
+urdf/meshes/ur20/
+urdf/meshes/ur30/
+urdf/meshes/ur8long/
+
+# ROS2 description repo (not needed for sim)
+Universal_Robots_ROS2_Description/
+
+# Scratch test files
+test_fk.py
+test_ik_logic.py
+test_pb.py
+test_pb_args.py
+mock_test.py
+test_hmi_full.py
+out*.log
+out*.txt
