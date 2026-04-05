@@ -102,8 +102,11 @@ class UR5eEnvironment:
 
     def _load_robot(self):
         print("[ENV] Loading robot...")
+        import os
+        _urdf = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                             "urdf", "ur5e_final.urdf")
         self._robot_id = p.loadURDF(
-            "urdf/ur5e_final.urdf",
+            _urdf,
             basePosition=ROBOT_BASE,
             useFixedBase=True,
             flags=p.URDF_USE_SELF_COLLISION

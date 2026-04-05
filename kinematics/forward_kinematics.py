@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import xml.etree.ElementTree as ET
 import math
@@ -18,7 +19,11 @@ def dh_transform(a, d, alpha, theta) -> np.ndarray:
         [0,   0,      0,     1]
     ])
 
-def parse_dh_from_urdf(urdf_path="urdf/ur5e_final.urdf"):
+def parse_dh_from_urdf(urdf_path=None):
+    if urdf_path is None:
+        # Tự động tìm file URDF theo vị trí tuyệt đối của module này
+        _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        urdf_path = os.path.join(_root, "urdf", "ur5e_final.urdf")
     """
     Đọc file XML, lấy 6 revolute joints và tính bảng DH cho UR5e.
     """
