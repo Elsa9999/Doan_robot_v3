@@ -58,7 +58,11 @@ Bảng thông số cấu hình dưới đây được trích xuất (Parse) tự
 | **6** | 0.0000 | 0.0996 | 0 | 0 | Wrist 3 |
 
 **Công thức Động học Thuận (Forward Kinematics):**
-$$ T_i^{i-1} = Rot_z(\theta_i) \cdot Trans_z(d_i) \cdot Trans_x(a_i) \cdot Rot_x(\alpha_i) $$
+
+$$
+T_i^{i-1} = Rot_z(\theta_i) \cdot Trans_z(d_i) \cdot Trans_x(a_i) \cdot Rot_x(\alpha_i)
+$$
+
 Sau đó nhân chuỗi 6 ma trận biến đổi thuần nhất (Homogeneous Transformation Matrix 4x4) lại với nhau để ra vị trí điểm cuối của tay gắp (End-Effector).
 
 ### 2. Thuật giải Động học Nghịch (Inverse Kinematics)
