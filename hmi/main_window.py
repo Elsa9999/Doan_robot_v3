@@ -11,6 +11,7 @@ from hmi.widgets.status_panel import StatusPanel
 from hmi.widgets.log_panel import LogPanel
 from hmi.widgets.trajectory_panel import TrajectoryPanel
 from hmi.widgets.auto_panel import AutoPanel
+from hmi.widgets.ai_panel import AIPanel
 from kinematics.forward_kinematics import forward_kinematics
 from kinematics.workspace_validator import WorkspaceValidator
 from utils.transforms import local_to_world
@@ -157,7 +158,11 @@ class MainWindow(QMainWindow):
 
         # Tab 3: Auto
         self.auto_panel = AutoPanel()
-        self.tab_widget.addTab(self.auto_panel, "🤖  Auto")
+        self.tab_widget.addTab(self.auto_panel, "⚙️  Auto (Cổ điển)")
+
+        # Tab 4: AI Mode
+        self.ai_panel = AIPanel()
+        self.tab_widget.addTab(self.ai_panel, "🧠  AI (Học Tăng Cường)")
 
         # Disable manual/traj when Auto is active
         self.tab_widget.currentChanged.connect(self._on_tab_changed)
@@ -182,12 +187,13 @@ class MainWindow(QMainWindow):
 
     def _on_tab_changed(self, idx):
         tab_name = self.tab_widget.tabText(idx)
-        if 'Auto' in tab_name:
-            # Switch to auto tab — do nothing, user presses Start
+        if 'Auto' in tab_name or 'AI' in tab_name:
+            # Switch to auto/ai tab — do nothing, user presses Start
             pass
         else:
-            # Switch away from auto — stop auto if running
+            # Switch away from auto/ai — stop auto if running
             self._bridge.send_command({'type': 'stop_auto'})
+            self._bridge.send_command({'type': 'stop_ai'})
 
     def _setup_statusbar(self):
         self.statusBar()
@@ -218,6 +224,10 @@ class MainWindow(QMainWindow):
             lambda: self._bridge.send_command({'type': 'stop_auto'}))
         self.auto_panel.reset_error.connect(
             lambda: self._bridge.send_command({'type': 'reset_error'}))
+        
+        # AI panel
+        self.ai_panel.ai_start.connect(lambda: self._bridge.send_command({'type': 'start_ai'}))
+        self.ai_panel.ai_stop.connect(lambda: self._bridge.send_command({'type': 'stop_ai'}))
         
     def _on_joints_changed(self, q):
         if self._estop: return
@@ -298,6 +308,13 @@ class MainWindow(QMainWindow):
             'gripper':   state.get('gripper', False),
             'mode':      state.get('mode', 'manual'),
             'error_msg': state.get('sm_error', ''),
+        })
+
+        # AI panel
+        self.ai_panel.update_state({
+            'mode': state.get('mode', 'manual'),
+            'ai_loaded': state.get('ai_loaded', False),
+            'ai_success_count': state.get('ai_success_count', 0)
         })
 
         # Workspace indicator

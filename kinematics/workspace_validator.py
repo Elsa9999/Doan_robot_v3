@@ -8,7 +8,7 @@ WORKSPACE_LIMITS = {
     'y_min': -0.40,
     'y_max':  0.40,
     'z_min':  0.44,   # TABLE_SURFACE (0.42) + 0.02 safety margin
-    'z_max':  1.20,
+    'z_max':  1.40,
 
     # Vùng cấm — bin box
     'bin_forbidden': {

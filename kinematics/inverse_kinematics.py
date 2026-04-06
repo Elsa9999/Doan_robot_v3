@@ -1,10 +1,20 @@
+"""
+Tệp inverse_kinematics.py:
+Lõi Toán học giải bài toán Đoán góc xoay ngược từ Tọa độ đích (Inverse Kinematics).
+Hệ thống sử dụng cả 2 phương pháp:
+1. Analytical (Giải tích): Tính toán nhanh siêu tốc thông qua ma trận DH và lượng giác.
+2. Numerical (Số học cận biên): Dùng thuật toán L-BFGS-B khi vật vượt ngoài tầm giải tích đơn thuần (dự phòng).
+"""
 import numpy as np
 import math
 import scipy.optimize
 from kinematics.forward_kinematics import forward_kinematics, DH_TABLE, dh_transform
 
 def euler_matrix(euler):
-    """Tạo ma trận xoay từ góc Euler ZYX (Roll, Pitch, Yaw)"""
+    """
+    Tạo ma trận xoay 3x3 từ 3 góc Euler ZYX (Roll, Pitch, Yaw).
+    Góc Euler là cách để định nghĩa góc chéo của vật thể khi bị nghiêng trong không gian.
+    """
     x, y, z = euler
     cx, sx = math.cos(x), math.sin(x)
     cy, sy = math.cos(y), math.sin(y)
@@ -29,7 +39,11 @@ def validate_limits(q):
     return True
 
 def analytical_ik(T_target):
-    """Tính IK theo phương pháp giải tích (Analytical)"""
+    """
+    Tính Inverse Kinematics (IK) bằng phương pháp Cổ điển Giải tích (Analytical).
+    Đây là cách tính toán hình học trực diện, cực kỳ nhẹ và nhanh nhưng giới hạn trong không gian lý tưởng.
+    Đầu vào: T_target (Ma trận 4x4 đại diện cho vị trí và góc xoay mong muốn của End-Effector).
+    """
     # Lấy thông số trực tiếp từ bảng DH_TABLE
     d1 = DH_TABLE[0]['d'] 
     a2 = DH_TABLE[1]['a'] 
@@ -114,7 +128,11 @@ def analytical_ik(T_target):
     return sols
 
 def numerical_ik(T_target, q_current=None):
-    """Tính IK theo phương pháp tối ưu hóa số học (Numerical)"""
+    """
+    Tính IK bằng Thuật toán tối ưu hóa (Numerical). Dùng làm phương án dự phòng (Fallback).
+    Khi mục tiêu gắp nằm ở góc cực hẹp khiến Giải tích báo lỗi, Numerical sẽ tính đạo hàm
+    để ép các khớp nghiêng nhẹ tới điểm gần đúng nhất mà không vi phạm quy tắc xoay.
+    """
     if q_current is None:
         q_current = [0, -math.pi/2, math.pi/2, -math.pi/2, -math.pi/2, 0]
         
@@ -138,8 +156,14 @@ def numerical_ik(T_target, q_current=None):
 
 def inverse_kinematics(target_pos, target_euler, q_current=None, method='auto') -> dict:
     """
-    Tính động học ngược.
-    method: 'analytical' | 'numerical' | 'auto'
+    Hàm tổng - Tính động học ngược cho End-Effector của UR5e.
+    Quá trình:
+    1. Lắp ráp ma trận quay và tịnh tiến vào ma trận 4x4.
+    2. Chạy hàm giải tích (Analytical). 
+    3. Nếu vô nghiệm, hệ thống tự động nhảy sang chạy Số học (Numerical).
+    
+    Tùy chọn: method có thể ép cứng về 'analytical' hoặc 'numerical', mặc định là 'auto'.
+    Trả về Dictionary chứa góc xoay của 6 khớp an toàn nhất.
     """
     T_target = np.eye(4)
     T_target[:3, :3] = euler_matrix(target_euler)

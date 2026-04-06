@@ -1,20 +1,49 @@
 """
-Environment wrapper for PyBullet — dynamics-based control.
-Không dùng resetJointState ở runtime, dùng POSITION_CONTROL để có collision.
+Tệp environment.py: 
+Đóng vai trò là "Thế giới Vật lý Ảo" (Simulation Engine) cho toàn bộ đồ án.
+Mục đích:
+- Khởi tạo và thiết lập môi trường PyBullet (Trọng lực, Tốc độ khung hình 240Hz).
+- Tạo ra các đối tượng vật lý gồm: Sàn nhà, Bàn làm việc, Thùng rác, Cục mút di động.
+- Nạp (Load) mô hình động học Robot UR5e và kết nối các khớp (joints).
+- Cung cấp các hàm tương tác vật lý (Điều khiển tốc độ/vị trí khớp, di chuyển bằng Cartesian).
+Note: Không dùng `resetJointState` ở thời gian thực (runtime), mà dùng `POSITION_CONTROL` để robot có khả năng va chạm vật lý (Collision).
 """
+from pathlib import Path
+import numpy as np
 import pybullet as p
 import pybullet_data
 import time
 import random
+import math
 
-TABLE_HEIGHT  = 0.40
-TABLE_THICK   = 0.02
-TABLE_SURFACE = 0.42
+# Đường dẫn cố định dựa trên vị trí file này, không phụ thuộc working directory
+_SIM_DIR  = Path(__file__).resolve().parent
+_URDF_DIR = _SIM_DIR.parent / "urdf"
 
-ROBOT_BASE    = [0.0, 0.0, TABLE_SURFACE]
+# ─── CẤU HÌNH THÔNG SỐ VẬT LÝ VÀ ĐỊA HÌNH ───
+TABLE_HEIGHT  = 0.40      # Chiều cao của chân bàn (mét)
+TABLE_THICK   = 0.02      # Độ dày của mặt bàn 
+TABLE_SURFACE = 0.42      # Mặt phẳng làm việc (Chiều cao z = 0.40 + 0.02)
+
+ROBOT_BASE    = [0.0, 0.0, TABLE_SURFACE]  # Tọa độ gốc đặt Robot (ngay trên mặt bàn)
+# Tư thế nghỉ (Home Pose) của robot tính bằng góc radian ở 6 khớp
 HOME_POSE     = [0, -1.5708, 1.5708, -1.5708, -1.5708, 0]
 
+# Khu vực rải ngẫu nhiên khối mút (x: 0.3 -> 0.7, y: -0.15 -> 0.15)
 WORK_ZONE = {'x': (0.3, 0.7), 'y': (-0.15, 0.15)}
+
+# Thùng chứa mục tiêu (Sọt rác)
+BIN_CENTER = [0.65, -0.28, TABLE_SURFACE]   # Trọng tâm tọa độ Thùng (x, y, z trên mặt bàn)
+BIN_HALF   = [0.096, 0.071]                  # Nửa chiều rộng / nửa chiều sâu để tính toán giới hạn va chạm
+
+# Workspace bounds cho EE (Cartesian control)
+EE_WORKSPACE = {
+    'x': (0.20, 0.75),
+    'y': (-0.30, 0.30),
+    'z': (0.44, 0.95),   # trên mặt bàn (TABLE_SURFACE=0.42) đến tầm tay
+}
+
+CART_DELTA_MAX = 0.05   # m/step — 5cm tối đa mỗi bước
 
 CAMERA = {
     'distance': 1.2,
@@ -35,15 +64,20 @@ JOINT_PD = [
 
 
 class UR5eEnvironment:
+    """Lớp đối tượng chịu trách nhiệm xây dựng và quản lý toàn bộ Thế giới Vật lý của Robot UR5e."""
+
     def __init__(self, gui=True):
+        # 1. Khởi tạo PyBullet Client
+        # Nếu chạy có giao diện (GUI) sẽ tạo cửa sổ đồ họa, nếu không sẽ chạy ngầm (DIRECT) - tốt cho training RL
         if gui:
             self._physics_client = p.connect(p.GUI)
         else:
             self._physics_client = p.connect(p.DIRECT)
 
-        p.setGravity(0, 0, -9.81)
-        p.setTimeStep(1 / 240)
-        p.setRealTimeSimulation(0)
+        # 2. Tuỳ chỉnh Vật lý cơ bản
+        p.setGravity(0, 0, -9.81)    # Lực hấp dẫn của Trái Đất (Z hướng xuống)
+        p.setTimeStep(1 / 240)       # Tần số mô phỏng chuẩn Mỹ: 240 khung hình / 1 giây
+        p.setRealTimeSimulation(0)   # Chạy Step by Step (thay vì tự động Realtime) để ta có toàn quyền kiểm soát vòng lặp
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
 
         p.resetDebugVisualizerCamera(
@@ -57,6 +91,7 @@ class UR5eEnvironment:
         self._table_ids = []
         self._bin_ids = []
         self._object_id = -1
+        self._constraint_id = -1
         self._work_zone_lines = []
 
         self._load_ground()
@@ -102,11 +137,14 @@ class UR5eEnvironment:
 
     def _load_robot(self):
         print("[ENV] Loading robot...")
-        import os
-        _urdf = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                             "urdf", "ur5e_final.urdf")
+        _urdf = _URDF_DIR / "ur5e_final.urdf"
+        if not _urdf.exists():
+            raise FileNotFoundError(
+                f"[ENV] URDF not found: {_urdf}\n"
+                f"  Expected in: {_URDF_DIR}"
+            )
         self._robot_id = p.loadURDF(
-            _urdf,
+            str(_urdf),
             basePosition=ROBOT_BASE,
             useFixedBase=True,
             flags=p.URDF_USE_SELF_COLLISION
@@ -127,7 +165,6 @@ class UR5eEnvironment:
 
     def _load_bin(self):
         print("[ENV] Loading bin...")
-        BIN_CENTER = [0.65, -0.28, TABLE_SURFACE]
         color = [0.25, 0.25, 0.25, 1.0]
 
         def create_wall(halfExt, local_pos):
@@ -146,11 +183,36 @@ class UR5eEnvironment:
         create_wall([0.096, 0.004, 0.056], [0,  0.071, 0.060])
         create_wall([0.096, 0.004, 0.056], [0, -0.071, 0.060])
 
-    def _spawn_object(self, pos=None):
-        print("[ENV] Spawning object...")
+    def _spawn_object(self, pos=None, difficulty=2):
+        """Spawn object với curriculum difficulty.
+        difficulty=0: gần EE home (r ≤ 0.15m) — dễ
+        difficulty=1: vừa (r ≤ 0.25m)           — vừa
+        difficulty=2: full random trong WORK_ZONE  — khó
+        """
         if pos is None:
-            x = random.uniform(WORK_ZONE['x'][0] + 0.05, WORK_ZONE['x'][1] - 0.05)
-            y = random.uniform(WORK_ZONE['y'][0] + 0.05, WORK_ZONE['y'][1] - 0.05)
+            if difficulty == 0:
+                # Spawn gần EE home position (~0.45, 0, table) trong bán kính 0.12~0.25m
+                # r phải > grasp_threshold (0.035) rất nhiều để tránh reward hacking
+                EE_HOME_XY = [0.45, 0.0]
+                r   = random.uniform(0.12, 0.25)  # minimum 12cm, agent PHẢI di chuyển
+                ang = random.uniform(0, 2 * 3.14159)
+                x   = EE_HOME_XY[0] + r * math.cos(ang)
+                y   = EE_HOME_XY[1] + r * math.sin(ang)
+                x   = max(WORK_ZONE['x'][0] + 0.05, min(WORK_ZONE['x'][1] - 0.05, x))
+                y   = max(WORK_ZONE['y'][0] + 0.05, min(WORK_ZONE['y'][1] - 0.05, y))
+            elif difficulty == 1:
+                # Spawn trong bán kính 0.25m từ EE home
+                EE_HOME_XY = [0.45, 0.0]
+                r   = random.uniform(0.05, 0.25)
+                ang = random.uniform(0, 2 * 3.14159)
+                x   = EE_HOME_XY[0] + r * math.cos(ang)
+                y   = EE_HOME_XY[1] + r * math.sin(ang)
+                x   = max(WORK_ZONE['x'][0] + 0.05, min(WORK_ZONE['x'][1] - 0.05, x))
+                y   = max(WORK_ZONE['y'][0] + 0.05, min(WORK_ZONE['y'][1] - 0.05, y))
+            else:
+                # Full random — giống bản cũ
+                x = random.uniform(WORK_ZONE['x'][0] + 0.05, WORK_ZONE['x'][1] - 0.05)
+                y = random.uniform(WORK_ZONE['y'][0] + 0.05, WORK_ZONE['y'][1] - 0.05)
             pos = [x, y, TABLE_SURFACE + 0.033]
 
         shape = p.createCollisionShape(p.GEOM_CYLINDER, radius=0.02, height=0.06)
@@ -211,15 +273,76 @@ class UR5eEnvironment:
         return [p.getJointState(self._robot_id, idx)[0]
                 for idx in self._joint_indices]
 
+    def get_joint_velocities(self) -> list:
+        return [p.getJointState(self._robot_id, idx)[1]
+                for idx in self._joint_indices]
+
+    def move_ee_cartesian(self, delta_xyz) -> bool:
+        """Cartesian EE control dùng PyBullet built-in IK.
+        Giống FetchReach / panda-gym: action = (dx, dy, dz).
+        Returns: True nếu IK thành công.
+        """
+        ee_link  = self._joint_indices[-1]
+        cur_pos  = list(p.getLinkState(self._robot_id, ee_link)[0])
+
+        # Tính target position + clip vào workspace
+        target = [
+            float(np.clip(cur_pos[0] + delta_xyz[0],
+                          EE_WORKSPACE['x'][0], EE_WORKSPACE['x'][1])),
+            float(np.clip(cur_pos[1] + delta_xyz[1],
+                          EE_WORKSPACE['y'][0], EE_WORKSPACE['y'][1])),
+            float(np.clip(cur_pos[2] + delta_xyz[2],
+                          EE_WORKSPACE['z'][0], EE_WORKSPACE['z'][1])),
+        ]
+
+        # UR5e joint limits (radians) — giới hạn vật lý của robot
+        _ll = [-2*np.pi, -2*np.pi, -np.pi,   -2*np.pi, -2*np.pi, -2*np.pi]
+        _ul = [ 2*np.pi,  2*np.pi,  np.pi,    2*np.pi,  2*np.pi,  2*np.pi]
+        _jr = [ 4*np.pi,  4*np.pi,  2*np.pi,  4*np.pi,  4*np.pi,  4*np.pi]  # range = ul-ll
+
+        # PyBullet built-in IK với joint limit constraints
+        # QUAN TRỌNG: không có lowerLimits/upperLimits → IK trả về 46 rad → robot bay ra 46m!
+        ik = p.calculateInverseKinematics(
+            self._robot_id, ee_link, target,
+            lowerLimits=_ll,
+            upperLimits=_ul,
+            jointRanges=_jr,
+            restPoses=list(HOME_POSE),   # Bias về home pose → tránh singularity
+            maxNumIterations=100,
+            residualThreshold=1e-4,
+        )
+
+        # PyBullet trả về tuple length = số DOF, thứ tự theo _joint_indices
+        # IK đôi khi trả về equivalent angle rất lớn (VD: 25 rad thay vì ~0.9 rad)
+        # → Normalize về góc tương đương gần nhất với joint hiện tại
+        current_q = [p.getJointState(self._robot_id, idx)[0]
+                     for idx in self._joint_indices]
+        q_target = []
+        for i, cur in enumerate(current_q):
+            raw = float(ik[i])
+            # Map raw → góc equiv gần cur nhất (tránh unwinding nhiều vòng)
+            diff = (raw - cur + np.pi) % (2 * np.pi) - np.pi
+            q_target.append(float(np.clip(cur + diff, -2*np.pi, 2*np.pi)))
+
+        self.set_joint_positions(q_target)
+        return True
+
+    def get_ee_position(self) -> list:
+        """Trả về EE position (xyz) — shortcut không cần unpack tuple."""
+        ee_link = self._joint_indices[-1]
+        return list(p.getLinkState(self._robot_id, ee_link)[0])
+
     # ─── Public API ───────────────────────────────────────────────────────────
 
-    def reset(self):
+    def reset(self, difficulty=2):
+        self.release_gripper()  # Ensure object is dropped before resetting
+
         if self._object_id != -1:
             p.removeBody(self._object_id)
             self._object_id = -1
         self.teleport_joints(HOME_POSE)
         self.step(10)
-        self._spawn_object()
+        self._spawn_object(difficulty=difficulty)
         self.draw_work_zone()
         self.step(100)
 
@@ -234,6 +357,61 @@ class UR5eEnvironment:
         ee_link = self._joint_indices[-1]
         state = p.getLinkState(self._robot_id, ee_link)
         return state[0], state[1]
+
+    # ─── Virtual Gripper API ──────────────────────────────────────────────────
+    
+    def activate_gripper(self) -> bool:
+        """Create a fixed constraint between EE and Object if close enough."""
+        if self._constraint_id != -1:
+            return True  # Already gripping
+
+        ee_pos = self.get_ee_position()
+        obj_pos = self.get_object_pose()[0]
+        dist = np.linalg.norm(np.array(ee_pos) - np.array(obj_pos))
+        
+        # grasp zone = 0.035m — chặt hơn để tránh reward hacking
+        # Agent PHẢI tiếp cận chínhxác mới gắp được
+        if dist < 0.035:
+            ee_link = self._joint_indices[-1]
+            self._constraint_id = p.createConstraint(
+                parentBodyUniqueId=self._robot_id,
+                parentLinkIndex=ee_link,
+                childBodyUniqueId=self._object_id,
+                childLinkIndex=-1,
+                jointType=p.JOINT_FIXED,
+                jointAxis=[0, 0, 0],
+                parentFramePosition=[0, 0, 0],
+                childFramePosition=[0, 0, 0]
+            )
+            return True
+        return False
+
+    def release_gripper(self):
+        """Remove the constraint if gripping."""
+        if self._constraint_id != -1:
+            p.removeConstraint(self._constraint_id)
+            self._constraint_id = -1
+
+    def is_gripping(self) -> bool:
+        return self._constraint_id != -1
+
+    def get_object_height(self) -> float:
+        """Height of object base relative to the table surface."""
+        obj_z = self.get_object_pose()[0][2]
+        return max(0.0, obj_z - TABLE_SURFACE)
+
+    def get_bin_center(self) -> list:
+        """Return the (x, y, z) center of the bin drop target."""
+        # Target is slightly above bin interior for carry navigation
+        return [BIN_CENTER[0], BIN_CENTER[1], BIN_CENTER[2] + 0.08]
+
+    def is_in_bin(self) -> bool:
+        """Check if object has been placed inside the bin."""
+        obj_pos = self.get_object_pose()[0]
+        in_x = abs(obj_pos[0] - BIN_CENTER[0]) < BIN_HALF[0]
+        in_y = abs(obj_pos[1] - BIN_CENTER[1]) < BIN_HALF[1]
+        above_floor = obj_pos[2] < (TABLE_SURFACE + 0.13)  # below top of bin walls
+        return in_x and in_y and above_floor
 
     def step(self, n=1):
         for _ in range(n):

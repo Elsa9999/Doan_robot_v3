@@ -1,7 +1,20 @@
+"""
+Tệp sim_bridge.py
+Đóng vai trò là "Cầu mương" (Bridge) hoặc "Tủy sống" truyền tín hiệu thần kinh.
+Nhiệm vụ:
+- Chạy một luồng vòng lặp riêng biệt (QThread) ở 240Hz độc lập với giao diện PyQt (UI) để không bị lag màn hình.
+- Lắng nghe yêu cầu từ người bấm nút (Manual, Auto, AI).
+- Triệu hồi (import) PyBullet Environment, giải phương trình động học (IK) rồi đẩy tín hiệu xuống cho Robot chạy thật.
+"""
 import time
 import queue
 from queue import Queue
 from threading import Thread
+from PyQt5.QtCore import QThread, pyqtSignal
+
+# Fix "WinError 1114" on Windows when loading PyTorch in a worker thread
+import torch
+from stable_baselines3 import SAC
 
 from simulation.environment import UR5eEnvironment, HOME_POSE
 from simulation.trajectory_executor import TrajectoryExecutor
@@ -19,8 +32,24 @@ LOOP_HZ      = 240
 PUBLISH_EVERY = 24      # 10 Hz state publish
 
 
-class SimBridge:
+class SimBridge(QThread):
+    """
+    Luồng chạy ngầm điều khiển toàn bộ logic phần cứng mô phỏng.
+    Các Signal (pyqtSignal) bên dưới là cách nó "hét" lên cho giao diện (Main Window) biết để cập nhật số má trên màn hình (vd: Tọa độ X=..., Tốc độ...).
+    """
+    state_updated = pyqtSignal(dict)   # Đẩy thông tin: Joint angles, Cartesian pos
+    log_msg       = pyqtSignal(str, str) # Đẩy dòng text Log: Nội dung, Loại log (INFO/ERROR)
+    
+    # [!] Quản lý State Machine Cổ Điển
+    sm_state_updated = pyqtSignal(str) 
+    sm_error         = pyqtSignal(str)
+    sm_finished      = pyqtSignal()
+    
+    # [!] Thống kê điểm số AI
+    ai_stats_updated = pyqtSignal(int)
+    
     def __init__(self):
+        super().__init__()
         self.command_queue  = Queue()
         self.state_queue    = Queue()
         self._env           = None
@@ -38,6 +67,8 @@ class SimBridge:
         self._step_counter  = 0
         self._traj_progress = 0.0
         self._sm_status     = {}
+        self._ai_model      = None
+        self._ai_success    = 0
 
     # ─── Lifecycle ────────────────────────────────────────────────────────────
 
@@ -58,6 +89,18 @@ class SimBridge:
         self._sm       = PickPlaceStateMachine(
             self._env, self._executor, self._gripper, self._detector
         )
+        
+        # Load AI Model
+        import os
+        model_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models_rl_place", "seed42", "best_model.zip")
+        if os.path.exists(model_path):
+            try:
+                # Custom_objects giúp bỏ qua bug tương thích gym <-> gymnasium
+                self._ai_model = SAC.load(model_path, device="cpu", custom_objects={"learning_rate": 0.0})
+                self._push_log("Loaded SAC Place Model", "INFO")
+            except Exception as e:
+                self._push_log(f"Fail to load SAC: {e}", "WARN")
+
         self._ready = True
 
         while self._running:
@@ -67,6 +110,8 @@ class SimBridge:
             # ── Update Auto SM ──
             if self._mode == 'auto' and not self._estop:
                 self._sm_status = self._sm.update()
+            elif self._mode == 'ai' and not self._estop and self._ai_model:
+                self._update_ai()
             elif self._mode != 'auto':
                 self._traj_progress = 1.0
 
@@ -140,6 +185,19 @@ class SimBridge:
                 self._mode = 'manual'
                 self._q_target = list(HOME_POSE)
                 self._push_log("Error reset, scene reloaded", 'INFO')
+
+            # ── AI mode commands ──
+            elif t == 'start_ai':
+                if self._ai_model:
+                    self._mode = 'ai'
+                    self._push_log("AI Mode Started", "INFO")
+                else:
+                    self._push_log("Cannot start AI - Model missing", "WARN")
+
+            elif t == 'stop_ai':
+                if self._mode == 'ai':
+                    self._mode = 'manual'
+                    self._push_log("AI Mode Stopped", "INFO")
 
             # ── Manual commands ──
             elif self._mode == 'manual':
@@ -265,6 +323,48 @@ class SimBridge:
         except ValueError as e:
             self._push_log(f"Cart traj blocked: {str(e)[:50]}", 'WARN')
 
+    def _update_ai(self):
+        # NẾU đang trong quá trình chờ đợi vật rơi xuống đáy
+        if hasattr(self, '_ai_wait_frames') and self._ai_wait_frames > 0:
+            self._ai_wait_frames -= 1
+            if self._ai_wait_frames == 0:
+                self._env.reset()
+                self._q_target = list(HOME_POSE)
+            return
+
+        import numpy as np
+        from simulation.environment import CART_DELTA_MAX
+        
+        # Build 13D obs
+        ee_pos = np.array(self._env.get_ee_position(), dtype=np.float32)
+        obj_pos = np.array(self._env.get_object_pose()[0], dtype=np.float32)
+        rel_obj = obj_pos - ee_pos
+        bin_pos = np.array(self._env.get_bin_center(), dtype=np.float32)
+        rel_bin = bin_pos - obj_pos
+        grip = np.array([1.0 if self._env.is_gripping() else 0.0], dtype=np.float32)
+        obs = np.concatenate([ee_pos, obj_pos, rel_obj, rel_bin, grip])
+
+        action, _ = self._ai_model.predict(obs, deterministic=True)
+        action = np.clip(action, -1.0, 1.0)
+        
+        
+        # Làm cực kỳ chậm để múa đều và mềm mại hơn (chỉ dùng 10% max speed)
+        delta = action[:3] * CART_DELTA_MAX * 0.1 
+        self._env.move_ee_cartesian(delta)
+        
+        if action[3] > 0:
+            self._env.activate_gripper()
+        else:
+            self._env.release_gripper()
+
+        # Check success
+        wait_frames = getattr(self, '_ai_wait_frames', 0)
+        if self._env.is_in_bin() and wait_frames <= 0:
+            self._ai_success += 1
+            self._push_log(f"AI thả thành công (Đợi nửa giây)! Tổng: {self._ai_success}", "INFO")
+            # Thiết lập chờ 0.5s (240hz / 2 = 120 frames) rồi mới reset
+            self._ai_wait_frames = 120 
+
     # ─── State publishing ──────────────────────────────────────────────────────
 
     def _publish_state(self):
@@ -290,6 +390,8 @@ class SimBridge:
             'sm_cycle':      sm.get('cycle', 0),
             'sm_error':      sm.get('error_msg', ''),
             'gripper':       self._gripper.is_activated() if self._gripper else False,
+            'ai_loaded':     self._ai_model is not None,
+            'ai_success_count': self._ai_success,
             'timestamp':     time.time(),
         }
 

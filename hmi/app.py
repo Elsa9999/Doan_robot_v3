@@ -2,6 +2,10 @@ import sys
 import os
 import time
 
+# Quan trọng nhất: Fix Crash trên Windows [WinError 1114]
+# Thư viện mạng Nơ-ron (PyTorch) BẮT BUỘC phải được import trước PyQt5
+import torch
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from threading import Thread
@@ -56,10 +60,10 @@ def main():
         app.processEvents()
 
     if bridge.is_ready():
-        splash.showMessage("  Simulation sẵn sàng!", Qt.AlignBottom | Qt.AlignLeft, QColor("#00ff88"))
+        splash.showMessage("  Simulation san sang!", Qt.AlignBottom | Qt.AlignLeft, QColor("#00ff88"))
     else:
-        print("[APP] Bridge timeout — GUI sẽ chạy không có sim")
-        splash.showMessage("  Khởi động GUI (không có sim)...", Qt.AlignBottom | Qt.AlignLeft, QColor("#ffcc00"))
+        print("[APP] Bridge timeout")
+        splash.showMessage("  Khoi dong GUI (khong co sim)...", Qt.AlignBottom | Qt.AlignLeft, QColor("#ffcc00"))
 
     app.processEvents()
     time.sleep(0.3)

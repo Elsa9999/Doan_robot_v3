@@ -1,5 +1,10 @@
 """
-simulation/pick_place_sm.py — Pick & Place State Machine.
+Tệp pick_place_sm.py
+Cỗ máy trạng thái hữu hạn (Finite State Machine - FSM) cho hệ thống Auto Cổ điển.
+Nguyên lý:
+Trái ngược với AI tự mò đường, chế độ Auto cổ điển hoạt động dựa trên các bước được LẬP TRÌNH CỨNG theo thứ tự tuần tự:
+IDLE -> DETECT -> APPROACH -> DESCEND -> PICK -> LIFT -> MOVE_TO_BIN -> PLACE -> RELEASE -> RETREAT -> DONE.
+Nếu ở bất kỳ bước nào mà Robot đi lệch quỹ đạo hoặc dãn khớp, FSM sẽ chuyển sang trạng thái ERROR và khoá hệ thống.
 """
 import time
 from enum import Enum, auto
@@ -39,12 +44,17 @@ STATE_ORDER = [
 
 
 class PickPlaceStateMachine:
+    """
+    Bộ điều khiển Cỗ máy trạng thái (FSM Controller).
+    Nó là thủ kho chứa các Tọa độ mục tiêu tính sẵn (pick_poses, place_poses),
+    và theo dõi xem Robot đã chạy xong quỹ đạo Trajectory của bước hiện tại hay chưa để chuyển sang bước sau.
+    """
     def __init__(self, env, executor, gripper, detector):
-        self._env       = env
-        self._executor  = executor
-        self._gripper   = gripper
-        self._detector  = detector
-        self._validator = WorkspaceValidator()
+        self._env       = env         # Trỏ tới Thế giới Vật lý
+        self._executor  = executor    # Trỏ tới Bộ kích hoạt Quỹ đạo (Người bóp lẫy)
+        self._gripper   = gripper     # Trỏ tới Nam châm hút
+        self._detector  = detector    # Trỏ tới Camera ảo (Quét vật thể)
+        self._validator = WorkspaceValidator() # Cảnh sát vùng cấm (Ngăn robot đập tay vào tường)
 
         self._state       = State.IDLE
         self._object_id   = None
@@ -121,10 +131,10 @@ class PickPlaceStateMachine:
         obj_pos    = pose['pos']
         self._pick_poses  = self._detector.compute_pick_poses(obj_pos)
         
-        # Override place_poses để đảm bảo EE luôn trên z=0.62 (trên miệng bin)
+        # Override place_poses để đảm bảo rớt tự do thay vì đâm quá sâu (tránh va chạm vật lý = gấp tay)
         self._place_poses = {
-            'above_bin': [BIN_CENTER[0], BIN_CENTER[1], 0.70],
-            'place':     [BIN_CENTER[0], BIN_CENTER[1], 0.62] 
+            'above_bin': [BIN_CENTER[0], BIN_CENTER[1], 0.75],
+            'place':     [BIN_CENTER[0], BIN_CENTER[1], 0.68] 
         }
 
         # Validate approach pose
