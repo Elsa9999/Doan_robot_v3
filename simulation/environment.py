@@ -178,10 +178,10 @@ class UR5eEnvironment:
             self._bin_ids.append(body_id)
 
         create_wall([0.096, 0.071, 0.004], [0, 0, 0.004])
-        create_wall([0.004, 0.071, 0.056], [-0.096, 0, 0.060])
-        create_wall([0.004, 0.071, 0.056], [ 0.096, 0, 0.060])
-        create_wall([0.096, 0.004, 0.056], [0,  0.071, 0.060])
-        create_wall([0.096, 0.004, 0.056], [0, -0.071, 0.060])
+        create_wall([0.004, 0.071, 0.035], [-0.096, 0, 0.039])
+        create_wall([0.004, 0.071, 0.035], [ 0.096, 0, 0.039])
+        create_wall([0.096, 0.004, 0.035], [0,  0.071, 0.039])
+        create_wall([0.096, 0.004, 0.035], [0, -0.071, 0.039])
 
     def _spawn_object(self, pos=None, difficulty=2):
         """Spawn object với curriculum difficulty.
@@ -215,6 +215,18 @@ class UR5eEnvironment:
                 y = random.uniform(WORK_ZONE['y'][0] + 0.05, WORK_ZONE['y'][1] - 0.05)
             pos = [x, y, TABLE_SURFACE + 0.033]
 
+        # Nâng cấp 17D: Random dáng nằm của vật thể (Đứng hoặc Lăn lóc ngang)
+        # Nằm ngang: Roll = 90 độ (pi/2) hoặc Pitch = 90 độ (pi/2). Yaw random.
+        quat = [0, 0, 0, 1] # Đứng thẳng (mặc định)
+        if difficulty >= 1 and random.random() < 0.5:
+            # 50% cơ hội đổ ngang trên bàn
+            roll = math.pi / 2
+            pitch = 0
+            yaw = random.uniform(0, 2 * math.pi)
+            quat = p.getQuaternionFromEuler([roll, pitch, yaw])
+            # Khi đổ ngang, trung tâm Z sẽ thấp hơn (bằng radius thay vì half-height)
+            pos[2] = TABLE_SURFACE + 0.02
+
         shape = p.createCollisionShape(p.GEOM_CYLINDER, radius=0.02, height=0.06)
         vis   = p.createVisualShape(p.GEOM_CYLINDER,   radius=0.02, length=0.06,
                                     rgbaColor=[0.1, 0.3, 0.9, 1.0])
@@ -222,7 +234,8 @@ class UR5eEnvironment:
             baseMass=0.1,
             baseCollisionShapeIndex=shape,
             baseVisualShapeIndex=vis,
-            basePosition=pos
+            basePosition=pos,
+            baseOrientation=quat
         )
         p.changeDynamics(self._object_id, -1,
                          lateralFriction=0.8, spinningFriction=0.05, rollingFriction=0.01)
@@ -277,13 +290,15 @@ class UR5eEnvironment:
         return [p.getJointState(self._robot_id, idx)[1]
                 for idx in self._joint_indices]
 
-    def move_ee_cartesian(self, delta_xyz) -> bool:
+    def move_ee_cartesian(self, delta_xyz, delta_euler=None) -> bool:
         """Cartesian EE control dùng PyBullet built-in IK.
-        Giống FetchReach / panda-gym: action = (dx, dy, dz).
+        Hỗ trợ 6D (Vị trí + Lật góc).
         Returns: True nếu IK thành công.
         """
         ee_link  = self._joint_indices[-1]
-        cur_pos  = list(p.getLinkState(self._robot_id, ee_link)[0])
+        link_state = p.getLinkState(self._robot_id, ee_link)
+        cur_pos  = list(link_state[0])
+        cur_quat = list(link_state[1])
 
         # Tính target position + clip vào workspace
         target = [
@@ -300,17 +315,38 @@ class UR5eEnvironment:
         _ul = [ 2*np.pi,  2*np.pi,  np.pi,    2*np.pi,  2*np.pi,  2*np.pi]
         _jr = [ 4*np.pi,  4*np.pi,  2*np.pi,  4*np.pi,  4*np.pi,  4*np.pi]  # range = ul-ll
 
+        target_quat = None
+        if delta_euler is not None:
+            cur_euler = p.getEulerFromQuaternion(cur_quat)
+            target_euler = [
+                cur_euler[0] + delta_euler[0],
+                cur_euler[1] + delta_euler[1],
+                cur_euler[2] + delta_euler[2],
+            ]
+            target_quat = p.getQuaternionFromEuler(target_euler)
+
         # PyBullet built-in IK với joint limit constraints
-        # QUAN TRỌNG: không có lowerLimits/upperLimits → IK trả về 46 rad → robot bay ra 46m!
-        ik = p.calculateInverseKinematics(
-            self._robot_id, ee_link, target,
-            lowerLimits=_ll,
-            upperLimits=_ul,
-            jointRanges=_jr,
-            restPoses=list(HOME_POSE),   # Bias về home pose → tránh singularity
-            maxNumIterations=100,
-            residualThreshold=1e-4,
-        )
+        if target_quat is not None:
+            ik = p.calculateInverseKinematics(
+                self._robot_id, ee_link, target,
+                targetOrientation=target_quat,
+                lowerLimits=_ll,
+                upperLimits=_ul,
+                jointRanges=_jr,
+                restPoses=list(HOME_POSE),
+                maxNumIterations=100,
+                residualThreshold=1e-4,
+            )
+        else:
+            ik = p.calculateInverseKinematics(
+                self._robot_id, ee_link, target,
+                lowerLimits=_ll,
+                upperLimits=_ul,
+                jointRanges=_jr,
+                restPoses=list(HOME_POSE),   # Bias về home pose → tránh singularity
+                maxNumIterations=100,
+                residualThreshold=1e-4,
+            )
 
         # PyBullet trả về tuple length = số DOF, thứ tự theo _joint_indices
         # IK đôi khi trả về equivalent angle rất lớn (VD: 25 rad thay vì ~0.9 rad)
@@ -369,10 +405,23 @@ class UR5eEnvironment:
         obj_pos = self.get_object_pose()[0]
         dist = np.linalg.norm(np.array(ee_pos) - np.array(obj_pos))
         
-        # grasp zone = 0.035m — chặt hơn để tránh reward hacking
-        # Agent PHẢI tiếp cận chínhxác mới gắp được
-        if dist < 0.035:
+        # Mở rộng vùng hút lên 4.5cm. Do khi lật ngang 17D, điểm trung tâm của xylanh và EE 
+        # có thể bị chệch một chút (do thành trụ cấn vật lý cản lại). 4.5cm mô phỏng độ nén của giác hút cao su.
+        if dist < 0.045:
             ee_link = self._joint_indices[-1]
+            
+            # [HOTFIX VĂNG VẬT] Tính toán ma trận biến đổi tương đối để bù trừ sai số vị trí.
+            # Tránh việc ép 2 tâm vật lý phải đè lên nhau (gây Physics Explosion bắn vật thể bay đi)
+            ee_pos, ee_quat = self.get_ee_pose()
+            obj_pos_tup, obj_quat_tup = self.get_object_pose()
+            
+            # Di chuyển Tọa độ của Vật về Hệ quy chiếu cục bộ (Local Frame) của Đầu Hút (EE)
+            inv_ee_pos, inv_ee_quat = p.invertTransform(ee_pos, ee_quat)
+            local_obj_pos, local_obj_quat = p.multiplyTransforms(
+                inv_ee_pos, inv_ee_quat, 
+                obj_pos_tup, obj_quat_tup
+            )
+            
             self._constraint_id = p.createConstraint(
                 parentBodyUniqueId=self._robot_id,
                 parentLinkIndex=ee_link,
@@ -380,8 +429,9 @@ class UR5eEnvironment:
                 childLinkIndex=-1,
                 jointType=p.JOINT_FIXED,
                 jointAxis=[0, 0, 0],
-                parentFramePosition=[0, 0, 0],
-                childFramePosition=[0, 0, 0]
+                parentFramePosition=local_obj_pos,
+                childFramePosition=[0, 0, 0],
+                parentFrameOrientation=local_obj_quat
             )
             return True
         return False
@@ -406,11 +456,13 @@ class UR5eEnvironment:
         return [BIN_CENTER[0], BIN_CENTER[1], BIN_CENTER[2] + 0.08]
 
     def is_in_bin(self) -> bool:
-        """Check if object has been placed inside the bin."""
+        """Check if object has been placed squarely inside the bin."""
         obj_pos = self.get_object_pose()[0]
-        in_x = abs(obj_pos[0] - BIN_CENTER[0]) < BIN_HALF[0]
-        in_y = abs(obj_pos[1] - BIN_CENTER[1]) < BIN_HALF[1]
-        above_floor = obj_pos[2] < (TABLE_SURFACE + 0.13)  # below top of bin walls
+        # Bắt buộc vật thể phải bay sát vào khoảng trống lõi của Thùng (Cách tâm < 5cm) 
+        # Chứ không được phép thả ngay khi vừa sượt qua mép viền ngoài của thành thùng.
+        in_x = abs(obj_pos[0] - BIN_CENTER[0]) < 0.050
+        in_y = abs(obj_pos[1] - BIN_CENTER[1]) < 0.050
+        above_floor = obj_pos[2] < (TABLE_SURFACE + 0.13)
         return in_x and in_y and above_floor
 
     def step(self, n=1):

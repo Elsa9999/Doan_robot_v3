@@ -90,16 +90,22 @@ class SimBridge(QThread):
             self._env, self._executor, self._gripper, self._detector
         )
         
-        # Load AI Model
+        # Load AI Model (Hỗ trợ cả 13D cũ và 17D mới)
         import os
-        model_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models_rl_place", "seed42", "best_model.zip")
-        if os.path.exists(model_path):
-            try:
-                # Custom_objects giúp bỏ qua bug tương thích gym <-> gymnasium
-                self._ai_model = SAC.load(model_path, device="cpu", custom_objects={"learning_rate": 0.0})
-                self._push_log("Loaded SAC Place Model", "INFO")
-            except Exception as e:
-                self._push_log(f"Fail to load SAC: {e}", "WARN")
+        model_17d = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models_rl_17d", "seed42", "best_model.zip")
+        model_13d = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models_rl_place", "seed42", "best_model.zip")
+        
+        try:
+            if os.path.exists(model_17d):
+                self._ai_model = SAC.load(model_17d, device="cpu", custom_objects={"learning_rate": 0.0})
+                self._push_log("Loaded SAC 17D Model (Rotation)", "INFO")
+                self._ai_mode = "17D"
+            elif os.path.exists(model_13d):
+                self._ai_model = SAC.load(model_13d, device="cpu", custom_objects={"learning_rate": 0.0})
+                self._push_log("Loaded SAC 13D Model (Place)", "INFO")
+                self._ai_mode = "13D"
+        except Exception as e:
+            self._push_log(f"Fail to load SAC: {e}", "WARN")
 
         self._ready = True
 
@@ -324,35 +330,123 @@ class SimBridge(QThread):
             self._push_log(f"Cart traj blocked: {str(e)[:50]}", 'WARN')
 
     def _update_ai(self):
+        import numpy as np
+        from simulation.environment import CART_DELTA_MAX
+        try:
+            from train_17d import EULER_DELTA_MAX
+        except ImportError:
+            EULER_DELTA_MAX = 0.08
+            
+        # NẾU đang trong giai đoạn thu tay về sau khi thả thành công HOẶC tự gỡ kẹt
+        state_retract = getattr(self, '_ai_returning', 0)
+        if state_retract > 0:
+            if state_retract == 1 or state_retract == 3:
+                # Phase 1: Kéo thẳng tay lên trời (Z) để thoát khỏi thành thùng rác
+                ee_cur = self._env.get_ee_position()
+                if ee_cur[2] > 0.25:
+                    self._ai_returning = 2 if state_retract == 1 else 4 # Chuyển sang Phase 2
+                else:
+                    self._env.move_ee_cartesian([0.0, 0.0, 0.02]) # Kéo lên
+                return
+                
+            elif state_retract == 2 or state_retract == 4:
+                # Phase 2: Tính nội suy đưa tay về HOME_POSE qua Joint Space
+                q_cur = np.array(self._env.get_joint_positions())
+                q_home = np.array(self._q_target) # Đã được set là HOME_POSE
+                
+                error = np.linalg.norm(q_cur - q_home)
+                if error < 0.05:
+                    # Đã về đến nhà an toàn
+                    self._ai_returning = 0
+                    if state_retract == 2:
+                        # Luồng Thành Công -> Bỏ rác xong -> Reset sinh cục rác mới
+                        self._env.reset()
+                    else:
+                        # Luồng Khôi Phục Kẹt (Jam) -> KHÔNG xóa rác -> Quét camera bay đi gắp lại!
+                        pass
+                    return
+
+                # Di chuyển mượt mà các khớp dần về HOME (Tốc độ x2 cho mượt)
+                step_q = q_cur + (q_home - q_cur) * 0.05 
+                self._env.set_joint_positions(step_q.tolist())
+                return
+
         # NẾU đang trong quá trình chờ đợi vật rơi xuống đáy
         if hasattr(self, '_ai_wait_frames') and self._ai_wait_frames > 0:
             self._ai_wait_frames -= 1
             if self._ai_wait_frames == 0:
-                self._env.reset()
+                # Bắt đầu thu tay về (Bắt đầu từ Phase 1: kéo lên)
+                self._ai_returning = 1
                 self._q_target = list(HOME_POSE)
             return
 
-        import numpy as np
-        from simulation.environment import CART_DELTA_MAX
-        
-        # Build 13D obs
+        # Build obs (13D hoặc 17D tùy model)
         ee_pos = np.array(self._env.get_ee_position(), dtype=np.float32)
-        obj_pos = np.array(self._env.get_object_pose()[0], dtype=np.float32)
-        rel_obj = obj_pos - ee_pos
+        
+        # [FAIL-SAFE TỰ ĐỘNG GỠ RỐI] Cảm biến kẹt (Jam Detector)
+        if not hasattr(self, '_ai_last_ee'):
+            self._ai_last_ee = ee_pos
+            self._ai_stuck_frames = 0
+            
+        dist_moved = np.linalg.norm(ee_pos - self._ai_last_ee)
+        if dist_moved < 0.002: # Khớp bị khóa, nhúc nhích chưa tới 2mm
+            self._ai_stuck_frames += 1
+        else:
+            self._ai_stuck_frames = 0
+            self._ai_last_ee = ee_pos
+            
+        if self._ai_stuck_frames > 60: # Nếu khựng đơ liên tục 2 Giây
+            self._push_log("Cảnh báo: Robot bị kẹt/vặn sai khớp. Kích hoạt Auto-Home!", 'WARN')
+            self._env.release_gripper()
+            self._ai_returning = 3 # Trạng thái 3: Gỡ kẹt (Không Xóa Rác)
+            self._q_target = list(HOME_POSE)
+            self._ai_stuck_frames = 0
+            return
+            
+        obj_pose = self._env.get_object_pose()
+        obj_pos = np.array(obj_pose[0], dtype=np.float32)
         bin_pos = np.array(self._env.get_bin_center(), dtype=np.float32)
+        
+        # [Visual Cadence HACK] Dừng nhịp (Dwell) nửa giây khi vừa chạm để hút
+        is_gripping = self._env.is_gripping()
+        was_gripping = getattr(self, '_ai_was_gripping', False)
+        
+        if is_gripping and not was_gripping:
+            self._ai_pause_frames = 15 
+            self._push_log("Chạm mục tiêu! Dừng 0.5s nén áp suất chân không...", "INFO")
+        self._ai_was_gripping = is_gripping
+        
+        if getattr(self, '_ai_pause_frames', 0) > 0:
+            self._ai_pause_frames -= 1
+            return
+        
+        # ── AI điều hướng + kiểm soát gripper ──────────────────────────────
+        rel_obj = obj_pos - ee_pos
         rel_bin = bin_pos - obj_pos
-        grip = np.array([1.0 if self._env.is_gripping() else 0.0], dtype=np.float32)
-        obs = np.concatenate([ee_pos, obj_pos, rel_obj, rel_bin, grip])
+        grip = np.array([1.0 if is_gripping else 0.0], dtype=np.float32)
+
+        if getattr(self, '_ai_mode', '13D') == '17D':
+            obj_quat = np.array(obj_pose[1], dtype=np.float32)
+            obs = np.concatenate([ee_pos, obj_pos, rel_obj, rel_bin, obj_quat, grip])
+        else: # 13D
+            obs = np.concatenate([ee_pos, obj_pos, rel_obj, rel_bin, grip])
 
         action, _ = self._ai_model.predict(obs, deterministic=True)
         action = np.clip(action, -1.0, 1.0)
-        
-        
-        # Làm cực kỳ chậm để múa đều và mềm mại hơn (chỉ dùng 10% max speed)
-        delta = action[:3] * CART_DELTA_MAX * 0.1 
-        self._env.move_ee_cartesian(delta)
-        
-        if action[3] > 0:
+
+        # Damping 0.5 — mượt giữa UI 30Hz và Training 240Hz
+        delta_xyz = action[:3] * CART_DELTA_MAX * 0.5
+
+        if len(action) == 7:
+            delta_euler = action[3:6] * EULER_DELTA_MAX * 0.5
+            self._env.move_ee_cartesian(delta_xyz, delta_euler)
+            grip_cmd = action[6]
+        else:
+            self._env.move_ee_cartesian(delta_xyz)
+            grip_cmd = action[3]
+
+        # AI (Phase-Based) tự điều khiển gripper đúng theo phase
+        if grip_cmd > 0:
             self._env.activate_gripper()
         else:
             self._env.release_gripper()
@@ -362,8 +456,12 @@ class SimBridge(QThread):
         if self._env.is_in_bin() and wait_frames <= 0:
             self._ai_success += 1
             self._push_log(f"AI thả thành công (Đợi nửa giây)! Tổng: {self._ai_success}", "INFO")
-            # Thiết lập chờ 0.5s (240hz / 2 = 120 frames) rồi mới reset
-            self._ai_wait_frames = 120 
+            
+            # [HOTFIX] Bắt buộc nhả giác hút ra để vật thể rơi thụp xuống đáy thùng nhìn cho logic
+            self._env.release_gripper()
+            
+            # Liền lập tức chuyển form sang chế độ thu tay mượt mà (Delay 30 khung hình cho vật rơi)
+            self._ai_wait_frames = 30 
 
     # ─── State publishing ──────────────────────────────────────────────────────
 
