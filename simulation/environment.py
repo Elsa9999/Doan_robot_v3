@@ -317,12 +317,29 @@ class UR5eEnvironment:
 
         target_quat = None
         if delta_euler is not None:
-            cur_euler = p.getEulerFromQuaternion(cur_quat)
+            cur_euler = list(p.getEulerFromQuaternion(cur_quat))
             target_euler = [
                 cur_euler[0] + delta_euler[0],
                 cur_euler[1] + delta_euler[1],
                 cur_euler[2] + delta_euler[2],
             ]
+            # ═══ CLAMP EULER — Ép EE thẳng đứng ═══
+            # THỰC TẾ: Ở HOME_POSE, Roll = ±pi (3.14), Pitch = 0.0
+            # Việc kẹp sai trục trước đó khiến robot phải vặn ngược cổ tay 180 độ
+            ROLL_LIM = np.pi / 12  # ±15°
+            PITCH_LIM = np.pi / 12 # ±15°
+
+            # Kẹp Roll quanh biên ±pi
+            if target_euler[0] > 0:
+                target_euler[0] = float(np.clip(target_euler[0], np.pi - ROLL_LIM, np.pi))
+            else:
+                target_euler[0] = float(np.clip(target_euler[0], -np.pi, -np.pi + ROLL_LIM))
+            
+            # Kẹp Pitch quanh 0
+            target_euler[1] = float(np.clip(target_euler[1], -PITCH_LIM, PITCH_LIM))
+            
+            # Khóa Yaw tự do
+            target_euler[2] = float(np.clip(target_euler[2], -np.pi, np.pi))
             target_quat = p.getQuaternionFromEuler(target_euler)
 
         # PyBullet built-in IK với joint limit constraints

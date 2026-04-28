@@ -137,11 +137,17 @@ class PickPlaceStateMachine:
             'place':     [BIN_CENTER[0], BIN_CENTER[1], 0.68] 
         }
 
-        # Validate approach pose
+        # Validate approach + pick poses
         approach = self._pick_poses['approach']
         ok, reason = self._validator.is_valid_ee(approach)
         if not ok:
             self._set_error(f"Approach blocked: {reason}")
+            return
+
+        pick = self._pick_poses['pick']
+        ok, reason = self._validator.is_valid_ee(pick)
+        if not ok:
+            self._set_error(f"Pick blocked: {reason}")
             return
 
         print(f"[SM] DETECT → object at {[f'{v:.3f}' for v in obj_pos]}")
