@@ -5,6 +5,11 @@ Hệ thống sử dụng cả 2 phương pháp:
 1. Analytical (Giải tích): Tính toán nhanh siêu tốc thông qua ma trận DH và lượng giác.
 2. Numerical (Số học cận biên): Dùng thuật toán L-BFGS-B khi vật vượt ngoài tầm giải tích đơn thuần (dự phòng).
 """
+import os
+import sys
+# Cấu hình Path để Python nhận diện thư mục gốc 'kinematics' khi chạy trực tiếp
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import numpy as np
 import math
 import scipy.optimize
@@ -40,9 +45,17 @@ def validate_limits(q):
 
 def analytical_ik(T_target):
     """
-    Tính Inverse Kinematics (IK) bằng phương pháp Cổ điển Giải tích (Analytical).
-    Đây là cách tính toán hình học trực diện, cực kỳ nhẹ và nhanh nhưng giới hạn trong không gian lý tưởng.
-    Đầu vào: T_target (Ma trận 4x4 đại diện cho vị trí và góc xoay mong muốn của End-Effector).
+    Hàm tính Động học nghịch (IK) bằng phương pháp Hình học Giải tích (Analytical/Geometric Closed-form).
+    
+    ƯU ĐIỂM CỦA PHƯƠNG PHÁP GIẢI TÍCH (SO VỚI SỐ HỌC):
+    - Hiệu suất cao: Dựa trên lượng giác thuần túy, có thể tính toán toàn bộ 8 nghiệm không gian trong < 1 mili-giây.
+    - Độ tin cậy: Tránh hoàn toàn lỗi phân kỳ (Diverge) và kẹt tại điểm kỳ dị (Singularity) của thuật toán Jacobian (Numerical).
+    
+    CÁCH HOẠT ĐỘNG:
+    Dựa trên quy tắc Tách hình học (Kinematic Decoupling). Tách bài toán 6 bậc tự do thành 2 bài toán nhỏ:
+    1. Tính tọa độ Tâm cổ tay (để tìm ra góc xoay của 3 khớp cánh tay).
+    2. Dùng ma trận quay (để tìm ra góc xoay của 3 khớp cổ tay).
+    Đầu vào: T_target (Ma trận 4x4 đại diện cho vị trí XYZ và góc xoay RPY mong muốn của kẹp gắp).
     """
     # Lấy thông số trực tiếp từ bảng DH_TABLE
     d1 = DH_TABLE[0]['d'] 
@@ -54,7 +67,9 @@ def analytical_ik(T_target):
     
     px, py, pz = T_target[0,3], T_target[1,3], T_target[2,3]
     
-    # 1. Tính vị trí Wrist Center (P05)
+    # BƯỚC 1 - TÌM TÂM CỔ TAY (WRIST CENTER)
+    # Tọa độ mũi gắp (T_target[:3, 3]) trừ đi một đoạn lùi bằng đúng khoảng cách d6 
+    # nhân với vector hướng dọc theo trục Z của End-Effector (T_target[:3, 2]).
     P05 = T_target[:3, 3] - d6 * T_target[:3, 2]
     
     r = math.hypot(P05[0], P05[1])
@@ -64,7 +79,9 @@ def analytical_ik(T_target):
     phi = math.atan2(P05[1], P05[0])
     asin_val = math.asin(d4 / r)
     
-    # 2. theta1 (2 solutions: Left/Right)
+    # BƯỚC 2 - GIẢI KHỚP VAI THETA 1
+    # Do có cộng trừ (+-) nên hệ thống luôn tính ra 2 nghiệm song song:
+    # 1 nghiệm tương ứng với cấu hình Vai Trái (Left Arm), 1 nghiệm tương ứng Vai Phải (Right Arm)
     th1_sols = [phi + asin_val, phi + math.pi - asin_val]
     
     sols = []
@@ -101,7 +118,9 @@ def analytical_ik(T_target):
                 P14x, P14y = T14[0,3], T14[1,3]
                 dist_sq = P14x**2 + P14y**2
                 
-                # 4. Tính theta3 từ định lý hàm cos
+                # BƯỚC 4 - GIẢI KHỚP KHUỶU TAY THETA 3
+                # Áp dụng Định lý Hàm số Cosin cho tam giác tạo bởi bắp tay (a2) và cẳng tay (a3).
+                # Sẽ đẻ ra tiếp 2 nghiệm: Khuỷu tay gập lên (Elbow Up) hoặc gập xuống (Elbow Down)
                 c3 = (dist_sq - a2**2 - a3**2) / (2 * a2 * a3)
                 if abs(c3) > 1.0:
                     if abs(c3) < 1.001: c3 = np.sign(c3) * 1.0
@@ -213,11 +232,20 @@ if __name__ == "__main__":
     print("-" * 50)
     
     def run_test(name, q_ref, expected_sols_min=1):
+        """
+        PHƯƠNG PHÁP KIỂM CHỨNG VÒNG LẶP KÍN (ROUND-TRIP VERIFICATION)
+        Tự động kiểm tra độ chính xác tuyệt đối của 2 thuật toán Động học (FK & IK).
+        """
         print(f"\n{name}")
+        
+        # BƯỚC 1: KHỞI TẠO (FORWARD KINEMATICS)
+        # Nạp một cấu hình góc quay tham chiếu (q_ref) vào hàm FK để đo vị trí XYZ lý thuyết.
         fk_ref = forward_kinematics(q_ref)
         pos = fk_ref['position']
         euler = fk_ref['euler']
         
+        # BƯỚC 2: GIẢI NGƯỢC (INVERSE KINEMATICS)
+        # Dùng chính vị trí XYZ vừa tính ra, ép hàm IK giải ngược lại để tìm các cấu hình góc.
         ik_res = inverse_kinematics(pos, euler, q_current=q_ref)
         
         n_sols = ik_res['n_solutions']
@@ -228,7 +256,12 @@ if __name__ == "__main__":
         print(f"Số solutions: {n_sols} (Method: {ik_res['method']})")
         
         if n_sols >= expected_sols_min and best is not None:
+            # BƯỚC 3: ĐỐI CHIẾU VÀ TÍNH SAI SỐ (VERIFICATION)
+            # Lấy nghiệm tốt nhất của IK bỏ vào FK chạy lại lần 2.
             fk_check = forward_kinematics(best)
+            
+            # Tính khoảng cách Euclidean (Norm) giữa vị trí ban đầu và vị trí giải được.
+            # Hệ thống báo PASS nếu sai lệch tọa độ nhỏ hơn 1 milimet (0.001m).
             err = np.linalg.norm(np.array(fk_check['position']) - np.array(pos))
             print(f"Best Error  : {err:.6f}m")
             for i, (sol, sol_err) in enumerate(zip(ik_res['solutions'], ik_res['errors'])):

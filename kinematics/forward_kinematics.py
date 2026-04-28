@@ -1,11 +1,21 @@
 import os
+import sys
+# Cấu hình Path để Python nhận diện thư mục gốc 'kinematics' khi chạy trực tiếp
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import numpy as np
 import xml.etree.ElementTree as ET
 import math
 
 def dh_transform(a, d, alpha, theta) -> np.ndarray:
     """
-    Tính ma trận biến đổi thuần nhất theo convention DH tiêu chuẩn (Standard DH).
+    Hàm tính Ma trận biến đổi thuần nhất 4x4 (Homogeneous Transformation Matrix)
+    dựa trên 4 thông số của quy tắc Denavit-Hartenberg (Standard DH).
+    - a (Link length): Khoảng cách giữa 2 trục Z (chạy dọc theo trục X).
+    - d (Link offset): Khoảng cách dời dọc theo trục Z.
+    - alpha (Link twist): Góc xoắn từ trục Z cũ sang trục Z mới (quanh trục X).
+    - theta (Joint angle): Góc xoay thực tế của mô-tơ (quanh trục Z).
+    Ma trận kết quả trả về sẽ chứa thông tin Tịnh tiến và Xoay từ khớp i-1 sang khớp i.
     """
     ct = np.cos(theta)
     st = np.sin(theta)
@@ -86,17 +96,25 @@ def euler_from_matrix(R):
 
 def forward_kinematics(q: list) -> dict:
     """
-    Hàm Forward Kinematics chính.
-    Output: dict chứa ma trận T (4x4), position (x,y,z), euler (roll, pitch, yaw) và input q.
+    Hàm Động học thuận (Forward Kinematics - FK) lõi.
+    Mục đích: Từ giá trị 6 góc quay của 6 khớp (biến q), tính toán vị trí (x,y,z) của mũi robot.
+    
+    Thuật toán:
+    - Bắt đầu với ma trận gốc T = Ma trận đơn vị (Identity Matrix).
+    - Vòng lặp For chạy qua 6 khớp, tính ma trận cục bộ T_i của từng khớp.
+    - Nhân dồn các ma trận lại với nhau (Phép nhân ma trận T0_6 = T0_1 * T1_2 * ... * T5_6).
     """
     T = np.eye(4)
     # Lưu ý: Hệ trục base_link của URDF bị xoay 180 độ (Yaw=PI) so với chuẩn toán học DH.
     # Trong code này, ta giữ chuẩn toán học nguyên thuỷ của UR (base không xoay).
-    # Các robot vật lý UR cũng thường map frame 0 trực tiếp vào DH này.
     
     for i in range(6):
         dh = DH_TABLE[i]
+        # Lấy thông số (a, d, alpha) tĩnh và góc quay theta (q[i]) động để nạp vào hàm
         Ti = dh_transform(dh['a'], dh['d'], dh['alpha'], float(q[i]) + dh['offset'])
+        
+        # Phép toán @ trong thư viện Numpy chính là Phép nhân Ma trận (Matrix Multiplication)
+        # T mới = T cũ nhân với Ti
         T = T @ Ti
         
     pos = (T[0,3], T[1,3], T[2,3])
