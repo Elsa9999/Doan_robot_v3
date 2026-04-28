@@ -1,4 +1,7 @@
 pybullet
 numpy
 scipy
-xacrodoc
+PyQt5
+torch
+stable-baselines3
+gymnasium
